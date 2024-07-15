@@ -1,0 +1,230 @@
+#!node --experimental-default-type=module
+import fs from 'fs';
+const { stdin, stdout } = process,
+extrarows = stdin.isTTY && process.argv.length === 2 ? 2 : 0;
+const w = m => stdout.write(m+'');
+Array.prototype.find_and_map = function(f) {let v;if(this.some(x=>v=f(x)))return v}
+const precTable=t=>Object.fromEntries(t.map(x=>(t=x.splice(-2),x.map(x=>[x,t]))).flat());
+const INFIX_PREC = precTable([
+	['**',30,31],
+	['^','|','&',28,29],
+	['*','/',26,27],
+	['+','-',24,25],
+	['=','!=','<','>','<=','>=',22,23],
+	['&&','||',18,19],
+	[':=',16,17]
+]);
+const PREFIX_PREC = { '!': true, '~': true };
+const m = f => a => Math[f](...a);
+const builtinfuncs = { radians: ([a]) => a*Math.PI/180, degrees: ([a]) => a/Math.PI*180 };
+['min','max','abs','sin','cos','tan','log','ceil','floor','random','trunc','exp','sqrt','pow'].forEach(x => builtinfuncs[x] = m(x));
+const builtinvars = {
+	pi: Math.PI,
+	e: Math.E
+};
+const funcs = {}, vars = {}, history = [];
+const list = ['#help','#clear','#clearhistory','#export','#import','#vars','#funcs','#uservars','#userfuncs']
+	.concat(Object.keys(builtinvars))
+	.concat(Object.keys(builtinfuncs));
+
+let query, res, next = new Promise(r => res = r), suggest;
+
+const mv = (_x,_y,x=(_x<0?stdout.columns+_x:_x+1)+'',y=(_y<0?stdout.rows+_y:_y??'')+'') => y ? `\x1b[${y};${x}H` : `\x1b[${x}G`;
+const resit = m => mv(0,-extrarows)+m;
+const print = m => console.error(m,'\n'.repeat(extrarows));
+if (!extrarows)
+	process.exit(interp(query =
+		process.argv.slice(2).join(' ')+' '+(stdin.isTTY ? '' : await stdin.toArray().then(x => x.toString()))));
+
+console.clear(); w(resit(''));
+const emu = x => (w((query = x, `${resit('')}> ${x}\n`)),interp(x));
+try { fs.readFileSync('.calc', 'utf-8').split('\n').filter(x => x).forEach(emu); } catch (e) {}
+const closeHandler = () => { fs.writeFileSync('.calc', history.join('\n')); process.exit(); };
+process.on('SIGTERM', closeHandler); process.on('exit', closeHandler);
+
+function* Tokeniser(src) {
+	let index = 0, line = 1, lstart = 0;
+  const char = () => src[index] || '';
+	const token = (type, value, i = index) => ({ type, value, index: i + 1, line, lstart });
+	const getChars = r => { let out = ''; while (char().match(r)) { out += char(); ++index; } return out; };
+	while (index < src.length) {
+  	while (char().match(/\s/)) { ++index; if (src[index-1] === '\n') { lstart = index; ++line; } }
+		const ret = [
+			[[['number', /[0-9.]/, /[0-9xa-fA-F.]/, false, Number.parseFloat], ['var', /[a-zA-Z_]/, /[0-9a-zA-Z_]/],
+			['string', '"', /[^"]/, true], ['string', '\'', /[^']/, true]], ([t, sr, r, o, f = x => x]) => {
+				if (!char().match(sr)) return; if (o) ++index; const out = token(t, f(getChars(r))); if (o) ++index;
+				return out;
+			}],[['**', '+', '-', '*', '/', '=>', '&&', '||', '!=', '>=', '>', '<=', '<', ':=', '=', '(', ')', '{', '}',
+				'[', ']', ',', '!', '#', '&', '^', '|', '~'
+			],s => src.slice(index).startsWith(s) && (token(s, void 0, (index += s.length) - s.length))]
+  	].find_and_map(([t,f]) => t.find_and_map(f));
+  	if (ret) { yield ret; continue } if (index >= src.length) break;
+	  throw `Tokeniser error (ln ${line}:${index-lstart+1})`;
+	} while(1) yield token('EOF');
+} function alltokens(q) {const t=[],k=Tokeniser(q);do t.push(k.next().value);while(t[t.length-1].type!=='EOF')return t}
+
+function run(expr, args = {}) {
+	const { lhs, rhs, value } = expr, l = () => run(lhs, args), r = () => run(rhs, args);
+	switch (expr.op) { case 'number': return value;
+		case 'var': return args[value] ?? vars[value]?.value ??
+			builtinvars[value] ?? (() => {
+				if (builtinfuncs[value] ?? funcs[value]) throw `${value} is a function`;
+				throw `var ${value} not defined` })()
+		case ':=':
+			if (lhs.op === 'func') { list.push(lhs.f.value); funcs[lhs.f.value] = { args: lhs.args.map(x => x.value), f: rhs, query }; return lhs.f.value; }
+			list.push(lhs.value);
+			return (vars[lhs.value] = { value: run(rhs, args), query }).value;
+		case 'func': {
+			const func = funcs[expr.f.value], bfunc = builtinfuncs[expr.f.value];
+			if (func) return run(func.f, Object.fromEntries(expr.args.map((x,i) => [func.args[i], run(x, args)])));
+			if (bfunc) return bfunc(expr.args.map(x => run(x, args)));
+			if (builtinvars[expr.f.value] ?? vars[expr.f.value] !== undefined) throw `${expr.f.value} is not a function`;
+			throw `func ${expr.f.value} is not defined`;
+		}
+		case '+': return l() + r(); case '-': return l() - r(); case '*': return l() * r(); case '/': return l() / r();
+		case '=': return l() === r(); case '!=': return l() !== r();
+		case '>=': return l() >= r(); case '<=': return l() <= r(); case '>': return l() > r(); case '<': return l() < r();
+		case '!': return !r(); case '~': return ~r(); case '&': return l() & r(); case '|': return l() | r();
+		case '=>': return l() ? r() : true; case '&&': return l() && r(); case '||': return l() || r(); case '**': return l() ** r();
+	}
+}
+
+function parse(q) {
+	let index = 0; const tokens = alltokens(q), currentToken = () => tokens[index]; return parseExpr();
+function parseExpr(mprec = 0) { const eof = () => index >= tokens.length || currentToken().type === 'EOF',
+	type = t => !eof() && (t === undefined ? currentToken().type : currentToken().type === t),
+	atom = () => { switch (type()) { case 'number': case 'var': return (x => ({ op: x.type, ...x }))(tokens[index++]); default: throw 'invalid expression'; } };
+	const preExpr = () => { if (type('(')) { ++index; const expr = parseExpr(); ++index; return expr; }
+		if (!PREFIX_PREC[type()]) { const f = atom(), args = []; if (!type('(')) return f; ++index;
+			if (!eof() && !type(')')) { args.push(parseExpr());
+				while (!eof() && !type(')')) { if (!type(',')) throw 'arguments must be separated by commas'; ++index; args.push(parseExpr()); }
+			} ++index; return { op: 'func', f, args }; }
+		const op = type(); ++index; const rhs = preExpr(); return {op,rhs}; };
+	let lhs = preExpr(mprec); while (1) {
+		if (!INFIX_PREC[type()]) break; const [l,r] = INFIX_PREC[type()]; if (l < mprec) break;
+		const op = type(); ++index; const rhs = parseExpr(r); lhs = {lhs,op,rhs}; } return lhs;
+} }
+
+stdin.setRawMode(true);
+stdin.resume();
+let oquery = '', xi = 0, yi = 0, ti = -1;
+const prompt = () => w(resit(`\x1b[J> ${query}${(() => {
+	if (ti === -1) return '';
+	let out = '\n';
+	for (let i = 0; i < suggest.length; ++i) {
+		if (i === ti) out += `\x1b[7m`;
+		out += ` ${suggest[i]} `;
+		if (i === ti) out += `\x1b[27m`;
+	}
+	return out;
+})()}${mv(xi+2,-extrarows)}`));
+stdin.on('data', data => {
+	let key = data.toString('utf-8');
+	if (data[0] === 0x1b) {
+		const d = Array.from(data).slice(1).map(x => x.toString(16)).join('');
+		key = {
+			'5b41': 'uparrow', '5b42': 'downarrow', '5b43': 'rightarrow', '5b44': 'leftarrow', '': 'escape'
+		}[d];
+		if (key === undefined) console.error(data, d);
+	}
+	const xc = d => xi = (ti = -1, Math.min(query.length, Math.max(0, xi + d)));
+	const yc = d => {
+		if (!yi && d > 0) oquery = query;
+		yi = Math.min(history.length, Math.max(0, yi + d));
+		if (!yi) query = oquery;
+		else query = history[history.length - yi];
+		xi = query.length;
+		ti = -1;
+	};
+	const tc = () => (++ti, ti %= suggest.length);
+	const r = x => (x+'').split('').reverse().join('');
+	const word = () => r(r(query.slice(0, xi)).match(/[0-9a-zA-Z_#]*/));
+	const repl = (a,b) => query = r(r(query).replace(r(a), r(b)));
+	const replword = (a,b) => { repl(a,b); ti = -1; xi = query.length; };
+	switch (key) {
+		case 'escape': ti = -1; break;
+		case 'uparrow': yc(1); break; case 'downarrow': yc(-1); break;
+		case 'leftarrow': xc(-1); break; case 'rightarrow': xc(1); break;
+		case '\x03': process.exit();
+		case '\t': {
+			const s = word();
+			if (ti == -1) {
+				let ll = extrarows * stdout.columns;
+				suggest = list.filter(x => x.startsWith(s)).filter(x => ll > 0 ? (ll -= x.length + 2, true) : 0);
+				if (suggest.length === 1) { replword(s, suggest[0]); break; }
+				else if (suggest.length === 0) break;
+			}
+			tc();
+			query = repl(s, suggest[ti]);
+			xi += suggest[ti].length - s.length;
+			break;
+		}
+		case '\x7f': query = query.slice(0,xc(-1)) + query.slice(xi+1); ti = -1; break;
+		case '\n': case '\r': xi = yi = 0; ti = -1; prompt(); w('\n'); res(); return;
+		default: query = query.substr(0, xi) + key + query.substr(xi++); w(key); ti = -1; break;
+	}
+	prompt();
+});
+
+function formatpairs(pairs) {
+	const maxlen = Math.max(...pairs.map(x => x[0].length));
+	return pairs.map(([k,v]) => `${k}${mv(maxlen)} : ${v}`).join('\n');
+}
+
+if (!history.length) print('Type #help for more information');
+
+function interp() {
+	query = query.trim();
+	if (!query) return;
+	let addhist = true;
+	const params = (s) => {
+		const t = alltokens(query.slice(s.length));
+		if (t.length === 1) print(`${s} requires a parameter`);
+		return t.slice(0, -1);
+	};
+	const c = s => query.startsWith(s);
+	if (query === '#') process.exit();
+	try { switch (true) {
+		case c('#help'): print(`
+#help						Bring up this info
+#clear					Clear the screen
+#clearhistory		Clear the history
+#export "file"	Export variables and functions
+#import "file"	Import variables and functions
+#vars						List builtin variables
+#funcs					List builtin functions
+#uservars				List user defined variables
+#userfuncs			List user defined functions
+`);
+			break;
+		case c('#vars'): print(formatpairs(Object.entries(builtinvars))); break;
+		case c('#funcs'): print(formatpairs(Object.entries(builtinfuncs).map(([k]) => [k,'']))); break;
+		case c('#uservars'): print(formatpairs(Object.entries(vars).map(([k,v]) => [k, v.value]))); break;
+		case c('#userfuncs'): print(formatpairs(Object.entries(vars).map(([k,v]) => [k, v.query]))); break;
+		case c('#clearhistory'): emu('#export ""'); history.length = 0; emu('#import ""'); addhist = false;
+		case c('#clear'): console.clear(); break;
+		case c('#export'): {
+			const qs = Object.values(funcs).concat(Object.values(vars)).map(x => x.query);
+			const hist = Array.from(new Set(history.filter(x => qs.includes(x))));
+			fs.writeFileSync(`${params('#export')[0].value}.calc`, hist.join('\n'));
+			w('\n');
+			addhist = false;
+			break;
+		}
+		case c('#import'): {
+			const hist = fs.readFileSync(`${params('#import')[0].value}.calc`, 'utf-8').split('\n').filter(x => !history.includes(x));
+			hist.forEach(emu);
+			addhist = false;
+			break;
+		}
+		case c('#eval'): print(eval(query.slice('#eval'.length))); break;
+		default: 
+			try {
+				print(run(parse(query)));
+			} catch (e) { print(e); addhist = false; }
+	}
+	if (addhist) history.push(query);
+	} catch (e) {}
+}
+
+while(1) { query = ''; prompt(); await next; next = new Promise(r => res = r); interp(); }
