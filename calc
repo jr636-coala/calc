@@ -23,7 +23,7 @@ const builtinvars = {
 	e: Math.E
 };
 const funcs = {}, vars = {}, history = [];
-const list = ['#help','#clear','#clearhistory','#export','#import','#vars','#funcs','#uservars','#userfuncs']
+const list = ['#help','#clear','#clearhistory','#export','#import','#vars','#funcs','#uservars','#userfuncs','#rmfunc','#rmvar']
 	.concat(Object.keys(builtinvars))
 	.concat(Object.keys(builtinfuncs));
 
@@ -63,6 +63,14 @@ function* Tokeniser(src) {
 	} while(1) yield token('EOF');
 } function alltokens(q) {const t=[],k=Tokeniser(q);do t.push(k.next().value);while(t[t.length-1].type!=='EOF')return t}
 
+function str(x) {
+	if (!x) return '';
+	switch (x.op) {
+		case 'var': case 'number': return x.value;
+		case 'func': return `${str(x.f)}(${x.args.map(str).join(', ')})`;
+		default: return `${str(x.lhs)}${x.op}${str(x.rhs)}`;
+	}
+}
 function run(expr, args = {}) {
 	const { lhs, rhs, value } = expr, l = () => run(lhs, args), r = () => run(rhs, args);
 	switch (expr.op) { case 'number': return value;
@@ -93,7 +101,7 @@ function parse(q) {
 	let index = 0; const tokens = alltokens(q), currentToken = () => tokens[index]; return parseExpr();
 function parseExpr(mprec = 0) { const eof = () => index >= tokens.length || currentToken().type === 'EOF',
 	type = t => !eof() && (t === undefined ? currentToken().type : currentToken().type === t),
-	atom = () => { switch (type()) { case 'number': case 'var': return (x => ({ op: x.type, ...x }))(tokens[index++]); default: throw 'invalid expression'; } };
+	atom = () => { switch (type()) { case 'string': case 'number': case 'var': return (x => ({ op: x.type, ...x }))(tokens[index++]); default: throw 'invalid expression'; } };
 	const preExpr = () => { if (type('(')) { ++index; const expr = parseExpr(); ++index; return expr; }
 		if (!PREFIX_PREC[type()]) { const f = atom(), args = []; if (!type('(')) return f; ++index;
 			if (!eof() && !type(')')) { args.push(parseExpr());
@@ -195,13 +203,17 @@ function interp() {
 #funcs					List builtin functions
 #uservars				List user defined variables
 #userfuncs			List user defined functions
+#rmfunc					Remove user defined function
+#rmvar					Remove user defined variable
 `);
 			break;
+		case c('#rmfunc'): { const f = params('#rmfunc')[0].value; if (funcs[f]) delete funcs[f]; print(f); break }
+		case c('#rmvar'): { const f = params('#rmvar')[0].value; if (vars[f]) delete vars[f]; print(f); break }
 		case c('#vars'): print(formatpairs(Object.entries(builtinvars))); break;
 		case c('#funcs'): print(formatpairs(Object.entries(builtinfuncs).map(([k]) => [k,'']))); break;
 		case c('#uservars'): print(formatpairs(Object.entries(vars).map(([k,v]) => [k, v.value]))); break;
-		case c('#userfuncs'): print(formatpairs(Object.entries(vars).map(([k,v]) => [k, v.query]))); break;
-		case c('#clearhistory'): emu('#export ""'); history.length = 0; emu('#import ""'); addhist = false;
+		case c('#userfuncs'): print(formatpairs(Object.entries(funcs).map(([k,v]) => [`${k}(${v.args.join(', ')})`, str(v.f)]))); break;
+		case c('#clearhistory'): emu('#export ""'); history.length = 0; emu('#import ""'); emu('#clear'); addhist = false; break;
 		case c('#clear'): console.clear(); break;
 		case c('#export'): {
 			const qs = Object.values(funcs).concat(Object.values(vars)).map(x => x.query);
