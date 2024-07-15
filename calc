@@ -27,7 +27,7 @@ const list = ['#help','#clear','#clearhistory','#export','#import','#vars','#fun
 	.concat(Object.keys(builtinvars))
 	.concat(Object.keys(builtinfuncs));
 
-let query, res, next = new Promise(r => res = r), suggest;
+let query = '', clear = true, res, next = new Promise(r => res = r), suggest;
 
 const mv = (_x,_y,x=(_x<0?stdout.columns+_x:_x+1)+'',y=(_y<0?stdout.rows+_y:_y??'')+'') => y ? `\x1b[${y};${x}H` : `\x1b[${x}G`;
 const resit = m => mv(0,-extrarows)+m;
@@ -107,17 +107,17 @@ function parseExpr(mprec = 0) { const eof = () => index >= tokens.length || curr
 
 stdin.setRawMode(true);
 stdin.resume();
-let oquery = '', xi = 0, yi = 0, ti = -1;
-const prompt = () => w(resit(`\x1b[J> ${query}${(() => {
+let oquery = '', oxi, xi = 0, yi = 0, ti = -1;
+const prompt = (e = '') => w(resit(`\x1b[J> ${query}\n${(() => {
 	if (ti === -1) return '';
-	let out = '\n';
+	let out = '';
 	for (let i = 0; i < suggest.length; ++i) {
 		if (i === ti) out += `\x1b[7m`;
 		out += ` ${suggest[i]} `;
 		if (i === ti) out += `\x1b[27m`;
 	}
 	return out;
-})()}${mv(xi+2,-extrarows)}`));
+})()}${e}${mv(xi+2,-extrarows)}`));
 stdin.on('data', data => {
 	let key = data.toString('utf-8');
 	if (data[0] === 0x1b) {
@@ -160,7 +160,7 @@ stdin.on('data', data => {
 			break;
 		}
 		case '\x7f': query = query.slice(0,xc(-1)) + query.slice(xi+1); ti = -1; break;
-		case '\n': case '\r': xi = yi = 0; ti = -1; prompt(); w('\n'); res(); return;
+		case '\n': case '\r': oxi = xi; xi = yi = 0; ti = -1; prompt(); w('\n'); res(); return;
 		default: query = query.substr(0, xi) + key + query.substr(xi++); w(key); ti = -1; break;
 	}
 	prompt();
@@ -221,10 +221,10 @@ function interp() {
 		default: 
 			try {
 				print(run(parse(query)));
-			} catch (e) { print(e); addhist = false; }
+			} catch (e) { ti = -1; xi = oxi; prompt(e); clear = addhist = false; }
 	}
 	if (addhist) history.push(query);
 	} catch (e) {}
 }
 
-while(1) { query = ''; prompt(); await next; next = new Promise(r => res = r); interp(); }
+while(1) { if (clear) { query = ''; prompt(); } clear = true; await next; next = new Promise(r => res = r); interp(); }
