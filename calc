@@ -16,7 +16,9 @@ const INFIX_PREC = precTable([
 ]);
 const PREFIX_PREC = { '!': true, '~': true };
 const m = f => a => Math[f](...a);
-const builtinfuncs = { radians: ([a]) => a*Math.PI/180, degrees: ([a]) => a/Math.PI*180 };
+let view;
+const builtinfuncs = { radians: ([a]) => a*Math.PI/180, degrees: ([a]) => a/Math.PI*180,
+	hex: ([a]) => (view = 16, a), bin: ([a]) => (view = 2, a), dec: ([a]) => (view = 0, a), oct: ([a]) => (view = 8, a) };
 ['min','max','abs','sin','cos','tan','log','ceil','floor','random','trunc','exp','sqrt','pow'].forEach(x => builtinfuncs[x] = m(x));
 const builtinvars = {
 	pi: Math.PI,
@@ -50,13 +52,22 @@ function* Tokeniser(src) {
 	while (index < src.length) {
   	while (char().match(/\s/)) { ++index; if (src[index-1] === '\n') { lstart = index; ++line; } }
 		const ret = [
-			[[['number', /[0-9.]/, /[0-9xa-fA-F.]/, false, Number.parseFloat], ['var', /[a-zA-Z_]/, /[0-9a-zA-Z_]/],
+			[[['0x', /[0-9a-fA-F]/],['0b',/[01]/],['0',/[0-7]/]], ([s,r]) => {
+				if (!src.startsWith(s, index) || !r.test(src[index + s.length])) return;
+				index += s.length;
+				const f = x => Number.parseInt(x, {'0x':16,'0b':2,'0':8}[s]);
+				return token('number', f(getChars(r)));
+			}],
+			[[,],() => {
+				const oind = index;
+			}],
+			[[['number', /[0-9.]/, /[0-9. ]/, false, x => Number.parseFloat(x.replaceAll(' ', ''))], ['var', /[a-zA-Z_]/, /[0-9a-zA-Z_]/],
 			['string', '"', /[^"]/, true], ['string', '\'', /[^']/, true]], ([t, sr, r, o, f = x => x]) => {
 				if (!char().match(sr)) return; if (o) ++index; const out = token(t, f(getChars(r))); if (o) ++index;
 				return out;
 			}],[['**', '+', '-', '*', '/', '=>', '&&', '||', '!=', '>=', '>', '<=', '<', ':=', '=', '(', ')', '{', '}',
 				'[', ']', ',', '!', '#', '&', '^', '|', '~'
-			],s => src.slice(index).startsWith(s) && (token(s, void 0, (index += s.length) - s.length))]
+			],s => src.startsWith(s, index) && (token(s, void 0, (index += s.length) - s.length))]
   	].find_and_map(([t,f]) => t.find_and_map(f));
   	if (ret) { yield ret; continue } if (index >= src.length) break;
 	  throw `Tokeniser error (ln ${line}:${index-lstart+1})`;
@@ -73,6 +84,7 @@ function str(x) {
 }
 function run(expr, args = {}) {
 	const { lhs, rhs, value } = expr, l = () => run(lhs, args), r = () => run(rhs, args);
+	view = 0;
 	switch (expr.op) { case 'number': return value;
 		case 'var': return args[value] ?? vars[value]?.value ??
 			builtinvars[value] ?? (() => {
@@ -106,9 +118,11 @@ function parseExpr(mprec = 0) { const eof = () => index >= tokens.length || curr
 		if (!PREFIX_PREC[type()]) { const f = atom(), args = []; if (!type('(')) return f; ++index;
 			if (!eof() && !type(')')) { args.push(parseExpr());
 				while (!eof() && !type(')')) { if (!type(',')) throw 'arguments must be separated by commas'; ++index; args.push(parseExpr()); }
-			} ++index; return { op: 'func', f, args }; }
+			} ++index; return { op: 'func', f, args };
+		}
 		const op = type(); ++index; const rhs = preExpr(); return {op,rhs}; };
 	let lhs = preExpr(mprec); while (1) {
+		if(type('var') || type('number')) { if (INFIX_PREC['*'][0] < mprec) break; lhs = {lhs,op:'*',rhs:parseExpr(INFIX_PREC['*'][1])}; continue; }
 		if (!INFIX_PREC[type()]) break; const [l,r] = INFIX_PREC[type()]; if (l < mprec) break;
 		const op = type(); ++index; const rhs = parseExpr(r); lhs = {lhs,op,rhs}; } return lhs;
 } }
@@ -232,7 +246,13 @@ function interp() {
 		case c('#eval'): print(eval(query.slice('#eval'.length))); break;
 		default: 
 			try {
-				print(run(parse(query)));
+				const v = run(parse(query));
+				switch (view) {
+					case 16: print(`0x${v.toString(16)}`); break;
+					case 8: print(`0${v.toString(8)}`); break;
+					case 2: print(`0b${v.toString(2)}`); break;
+					default: print(v); break;
+				}
 			} catch (e) { ti = -1; xi = oxi; prompt(e); clear = addhist = false; }
 	}
 	if (addhist) history.push(query);
