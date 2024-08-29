@@ -12,26 +12,52 @@ const INFIX_PREC = precTable([
 	['+','-',24,25],
 	['=','!=','<','>','<=','>=',22,23],
 	['&&','||',18,19],
-	[':=',16,17]
+	// 17 -- lambda application
+	['.',15,16],
+	[',',13,14],
+	[':=',11,12]
 ]);
-const PREFIX_PREC = { '!': true, '~': true };
-const m = f => a => Math[f](...a);
-let view;
-const builtinfuncs = { radians: ([a]) => a*Math.PI/180, degrees: ([a]) => a/Math.PI*180,
-	hex: ([a]) => (view = 16, a), bin: ([a]) => (view = 2, a), dec: ([a]) => (view = 0, a), oct: ([a]) => (view = 8, a) };
-['min','max','abs','sin','cos','tan','log','ceil','floor','random','trunc','exp','sqrt','pow'].forEach(x => builtinfuncs[x] = m(x));
-const builtinvars = {
-	pi: Math.PI,
-	e: Math.E
+const sops = ['**', '+', '-', '*', '/', '=>', '&&', '||', '!=', '>=', '>', '<=', '<', '.', ':=', '=', '(', ')', '{', '}', '[', ']', ',', '!', '#', '&', '^', '|', '~'];
+const lambda = `\u03BB`;
+const equal = (a,b,am={},bm={}) => {
+	if (a === b) return true;
+	if (a.op !== b.op) return false;
+	const extmap = (m, a, b) => ({ ...m, ...Object.fromEntries(a.map((x,i) => [x,b[i]])) });
+	switch (a.op) {
+		case 'var': if (am[a.value] || bm[b.value]) return am[a.value] === b.value;
+		case 'number': return a.value === b.value;
+		case lambda: return a.lhs.length === b.lhs.length
+			&& equal(a.rhs, b.rhs, extmap(am, a.lhs, b.lhs), extmap(bm, b.lhs, a.lhs))
+	}
+	return equal(a.lhs, b.rhs, am, bm);
 };
-const funcs = {}, vars = {}, history = [];
-const list = ['#help','#clear','#clearhistory','#export','#import','#vars','#funcs','#uservars','#userfuncs','#rmfunc','#rmvar']
+const PREFIX_PREC = { '!': true, '~': true };
+const mw = value => ({ op: 'number', value });
+const mu = x => x.value;
+const m = f => (...a) => mw(Math[f](...a.map(mu)));
+let view;
+const intrinsics = { radians: a => mw(mu(a)*Math.PI/180), degrees: a => mw(mu(a)/Math.PI*180),
+	hex: a => (view = 16, a), bin: a => (view = 2, a), dec: a => (view = 0, a), oct: a => (view = 8, a),
+};
+['min','max','abs','sin','cos','tan','log','ceil','floor','random','trunc','exp','sqrt','pow'].forEach(x => intrinsics[x] = m(x));
+const builtinvars = {
+	pi: mw(Math.PI),
+	e: mw(Math.E),
+	pair: parse(`${lambda} f s p. p f s`),
+	true: parse(`${lambda} a b. a`),
+	false: parse(`${lambda} a b. b`)
+};
+const vars = {}, history = [];
+const list = ['#help','#clear','#clearhistory','#export','#import','#vars','#builtin','#intrinsics','#rmfunc','#rmvar']
 	.concat(Object.keys(builtinvars))
-	.concat(Object.keys(builtinfuncs));
 
 let query = '', clear = true, res, next = new Promise(r => res = r), suggest;
 
 const mv = (_x,_y,x=(_x<0?stdout.columns+_x:_x+1)+'',y=(_y<0?stdout.rows+_y:_y??'')+'') => y ? `\x1b[${y};${x}H` : `\x1b[${x}G`;
+const color = (c = 0xffffff) => {
+	const index = x => (x & 0xff) / 43 | 0;
+	return `\x1b[38;5;${index(c >> 16) * 36 + index(c >> 8) * 6 + index(c) + 16}m`;
+};
 const resit = m => mv(0,-extrarows)+m;
 const print = m => console.error(m,'\n'.repeat(extrarows));
 if (!extrarows)
@@ -43,6 +69,7 @@ const emu = x => (w((query = x, `${resit('')}> ${x}\n`)),interp(x));
 try { fs.readFileSync('.calc', 'utf-8').split('\n').filter(x => x).forEach(emu); } catch (e) {}
 const closeHandler = () => { fs.writeFileSync('.calc', history.join('\n')); process.exit(); };
 process.on('SIGTERM', closeHandler); process.on('exit', closeHandler);
+
 
 function* Tokeniser(src) {
 	let index = 0, line = 1, lstart = 0;
@@ -61,53 +88,34 @@ function* Tokeniser(src) {
 			[[,],() => {
 				const oind = index;
 			}],
-			[[['number', /[0-9.]/, /[0-9. ]/, false, x => Number.parseFloat(x.replaceAll(' ', ''))], ['var', /[a-zA-Z_]/, /[0-9a-zA-Z_]/],
+			[[[]], () => {
+				if (!char().match(/[.0-9]/)) return;
+				const i = index;
+				let frac = false;
+				while (true) {
+					if (char() === '.') {
+						if (frac) break; frac = true;
+					}
+					else if (!char().match(/[0-9]/)) break;
+					++index;
+				}
+				const n = Number.parseFloat(src.substring(i, index))
+				if (isNaN(n)) {
+					index = i;
+					return;
+				}
+				return token('number', n);
+			}],
+			[[['var', /[a-zA-Z_]/, /[0-9a-zA-Z_]/],
 			['string', '"', /[^"]/, true], ['string', '\'', /[^']/, true]], ([t, sr, r, o, f = x => x]) => {
 				if (!char().match(sr)) return; if (o) ++index; const out = token(t, f(getChars(r))); if (o) ++index;
 				return out;
-			}],[['**', '+', '-', '*', '/', '=>', '&&', '||', '!=', '>=', '>', '<=', '<', ':=', '=', '(', ')', '{', '}',
-				'[', ']', ',', '!', '#', '&', '^', '|', '~'
-			],s => src.startsWith(s, index) && (token(s, void 0, (index += s.length) - s.length))]
+			}],[sops.concat(lambda),s => src.startsWith(s, index) && (token(s, void 0, (index += s.length) - s.length))]
   	].find_and_map(([t,f]) => t.find_and_map(f));
   	if (ret) { yield ret; continue } if (index >= src.length) break;
 	  throw `Tokeniser error (ln ${line}:${index-lstart+1})`;
 	} while(1) yield token('EOF');
 } function alltokens(q) {const t=[],k=Tokeniser(q);do t.push(k.next().value);while(t[t.length-1].type!=='EOF')return t}
-
-function str(x) {
-	if (!x) return '';
-	switch (x.op) {
-		case 'var': case 'number': return x.value;
-		case 'func': return `${str(x.f)}(${x.args.map(str).join(', ')})`;
-		default: return `${str(x.lhs)}${x.op}${str(x.rhs)}`;
-	}
-}
-function run(expr, args = {}) {
-	const { lhs, rhs, value } = expr, l = () => run(lhs, args), r = () => run(rhs, args);
-	view = 0;
-	switch (expr.op) { case 'number': return value;
-		case 'var': return args[value] ?? vars[value]?.value ??
-			builtinvars[value] ?? (() => {
-				if (builtinfuncs[value] ?? funcs[value]) throw `${value} is a function`;
-				throw `var ${value} not defined` })()
-		case ':=':
-			if (lhs.op === 'func') { list.push(lhs.f.value); funcs[lhs.f.value] = { args: lhs.args.map(x => x.value), f: rhs, query }; return lhs.f.value; }
-			list.push(lhs.value);
-			return (vars[lhs.value] = { value: run(rhs, args), query }).value;
-		case 'func': {
-			const func = funcs[expr.f.value], bfunc = builtinfuncs[expr.f.value];
-			if (func) return run(func.f, Object.fromEntries(expr.args.map((x,i) => [func.args[i], run(x, args)])));
-			if (bfunc) return bfunc(expr.args.map(x => run(x, args)));
-			if (builtinvars[expr.f.value] ?? vars[expr.f.value] !== undefined) throw `${expr.f.value} is not a function`;
-			throw `func ${expr.f.value} is not defined`;
-		}
-		case '+': return l() + r(); case '-': return l() - r(); case '*': return l() * r(); case '/': return l() / r();
-		case '=': return l() === r(); case '!=': return l() !== r();
-		case '>=': return l() >= r(); case '<=': return l() <= r(); case '>': return l() > r(); case '<': return l() < r();
-		case '!': return !r(); case '~': return ~r(); case '&': return l() & r(); case '|': return l() | r();
-		case '=>': return l() ? r() : true; case '&&': return l() && r(); case '||': return l() || r(); case '**': return l() ** r();
-	}
-}
 
 function parse(q) {
 	let index = 0; const tokens = alltokens(q), currentToken = () => tokens[index]; return parseExpr();
@@ -115,17 +123,146 @@ function parseExpr(mprec = 0) { const eof = () => index >= tokens.length || curr
 	type = t => !eof() && (t === undefined ? currentToken().type : currentToken().type === t),
 	atom = () => { switch (type()) { case 'string': case 'number': case 'var': return (x => ({ op: x.type, ...x }))(tokens[index++]); default: throw 'invalid expression'; } };
 	const preExpr = () => { if (type('(')) { ++index; const expr = parseExpr(); ++index; return expr; }
-		if (!PREFIX_PREC[type()]) { const f = atom(), args = []; if (!type('(')) return f; ++index;
-			if (!eof() && !type(')')) { args.push(parseExpr());
-				while (!eof() && !type(')')) { if (!type(',')) throw 'arguments must be separated by commas'; ++index; args.push(parseExpr()); }
-			} ++index; return { op: 'func', f, args };
+		if (type(lambda)) { ++index;
+			const lhs = []; while (type('var')) { lhs.push(currentToken().value); ++index; }
+			if (!type('.')) throw `Malformed lambda`; ++index;
+			return {lhs,op:lambda,rhs:parseExpr()};
 		}
-		const op = type(); ++index; const rhs = preExpr(); return {op,rhs}; };
+		return atom(); };
 	let lhs = preExpr(mprec); while (1) {
-		if(type('var') || type('number')) { if (INFIX_PREC['*'][0] < mprec) break; lhs = {lhs,op:'*',rhs:parseExpr(INFIX_PREC['*'][1])}; continue; }
-		if (!INFIX_PREC[type()]) break; const [l,r] = INFIX_PREC[type()]; if (l < mprec) break;
-		const op = type(); ++index; const rhs = parseExpr(r); lhs = {lhs,op,rhs}; } return lhs;
+		if (!INFIX_PREC[type()]) {
+			if (eof() || type(')') || 17 <= mprec) break;
+			const rhs = parseExpr(17);
+			lhs = {lhs,op:'app',rhs};
+			continue;
+		}
+		const [l,r] = INFIX_PREC[type()]; if (l < mprec) break;
+		const op = type(); ++index; const rhs = parseExpr(r); lhs = {lhs,op,rhs}; }
+	return lhs;
 } }
+
+function str(x, is, isc, i) {
+	if (!x) return '';
+	const wrap = s => i && i !== x.op ? `(${s})` : s;
+	switch (x.op) {
+		case 'intrinsic':
+		case 'var': case 'number': return x.value;
+		case 'app': return wrap(`${str(x.lhs, isc && is, isc, 'app')} ${str(x.rhs, isc && is, isc, true)}`);
+		case lambda:
+			for (const v in builtinvars) if (isc !== '' && is !== v && equal(x, builtinvars[v])) return v;
+			for (const v in vars) if (isc !== '' && is !== v && equal(x, vars[v].value)) return v;
+			return wrap(`${lambda}${x.lhs.join(' ')}. ${str(x.rhs, isc && is, isc)}`);
+		default: return wrap(`${str(x.lhs, isc && is, isc, true)} ${x.op} ${str(x.rhs, isc && is, isc, true)}`);
+	}
+}
+function run(expr) {
+	view = 0;
+	//print(JSON.stringify(expr));
+	//print(str(expr, void 0, ''));
+	const { lhs, rhs, value } = expr,
+	l = () => run(lhs), r = () => run(rhs);
+	if (![':=','.',','].includes(expr.op) && sops.includes(expr.op)) {
+		const lhs = l(), rhs = r();
+		if (lhs.op !== 'number' || rhs.op !== 'number') return {lhs,op:expr.op,rhs};
+		const ln = mu(lhs), rn = mu(rhs);
+		const tru = builtinvars.true, fls = builtinvars.false;
+		const b = x => x ? tru : fls;
+		switch (expr.op) {
+			case '+': return mw(ln + rn); case '-': return mw(ln - rn); case '*': return mw(ln * rn); case '/': return mw(ln / rn);
+			case '=': return b(ln === rn); case '!=': return b(ln !== rn);
+			case '>=': return b(ln >= rn); case '<=': return b(ln <= rn); case '>': return b(ln > rn); case '<': return b(ln < rn);
+			case '!': return b(!rn); case '~': return mw(~rn); case '&': return mw(ln & rn); case '|': return mw(ln | rn);
+			case '=>': return ln ? mw(rn) : tru; case '&&': return b(ln && rn); case '||': return b(ln || rn); case '**': return mw(ln ** rn);
+		}
+	}
+
+	const pair = { op: 'var', value: 'pair' };
+	const terms = (e, intro) => { const t = new Set();
+		const it = e => { switch (e.op) {
+		case 'var': intro || t.add(e.value); break; case 'number': break;
+		case lambda: e.lhs.forEach(x => t.add(x)); it(e.rhs); break;
+		default: it(e.lhs); it(e.rhs); break; } };
+		it(e); return Array.from(t.values()); };
+	const _nt = (t, i = 0) => { t = [...t];
+		const s = _ => String.fromCharCode((_%26) + 'a'.charCodeAt() + (_/26|0));
+		return () => { let x; while (t.includes(x = s(i))) ++i; t.push(x); return x; };
+	};
+
+	switch (expr.op) {
+		case ',': return run({ lhs: { lhs: pair, op: 'app', rhs:l() }, op: 'app', rhs:r()});
+		case lambda: if (expr.rhs.op === lambda) {
+			//const rhs = r();
+			//return { op: lambda, lhs: lhs.concat(rhs.lhs), rhs: rhs.rhs };
+		}
+		case 'number': return expr;
+		case 'var': return vars[value]?.value ?? builtinvars[value] ?? (() => {
+			if (intrinsics[value]) return { op: 'intrinsic', value };
+			return expr})();
+		case ':=': {
+			let l = lhs;
+			while (l.op === 'app') l = l.lhs;
+			l = l.value;
+			list.push(l);
+			const r = run(rhs);
+			return (vars[l] = { rec: terms(r).includes(l), value: r, query }).value;
+		}
+		case 'app': {
+			const _l = l();
+			if (_l.op === 'intrinsic') {
+				const args = [];
+				const it = e => {
+					const l = run({ op: 'app', rhs: builtinvars.true, lhs: e });
+					const r = run({ op: 'app', rhs: builtinvars.false, lhs: e });
+					args.push(r);
+					if (r.op !== 'number') throw 'Bad intrinsic call';
+					if (l.op === lambda) it(l);
+					else if (l.op !== 'number') throw 'Bad intrinsic call';
+					else args.push(l);
+				};
+				it (r());
+				return intrinsics[_l.value](...args);
+			}
+			if (_l.op === lambda) {
+				const v = rhs;
+				let out = _l;
+				const lterms = terms(_l, true);
+				const riterms = terms(v, true);
+				const rterms = terms(v).filter(x => !riterms.includes(x));
+				const nt = _nt(lterms.concat(rterms));
+				for (const t of rterms) {
+					if (lterms.includes(t)) {
+						const v = {op: 'var',value: nt()};
+						const it = e => {
+							switch (e.op) {
+								case 'number': return e;
+								case 'var': return e.value === t ? v : e;
+								case lambda: return {lhs:e.lhs.map(x => x === t ? v.value : x),op:lambda,rhs:it(e.rhs)};
+								default: return { lhs: it(e.lhs), op: e.op, rhs: it(e.rhs) };
+							}
+						};
+						out = it(out);
+					}
+				}
+				const l = out;
+				const t = l.lhs[0];
+				let expv;
+				const _v = () => expv ?? (expv = run(v));
+				const it = e => {
+					switch (e.op) {
+						case 'number': return e;
+						case 'var': return e.value === t ? _v() : e;
+						case lambda: return e.lhs.includes(t) ? e : {...e,rhs:it(e.rhs)};
+						default: return { lhs: it(e.lhs), op: e.op, rhs: it(e.rhs) };
+					}
+				};
+				out = it(out.rhs);
+				if (l.lhs.length > 1) return { rec: _l.rec, lhs: l.lhs.slice(1), op: lambda, rhs: out };
+				return run(out);
+			}
+			return { lhs: _l, op: 'app', rhs: rhs };
+		}
+	}
+}
 
 stdin.setRawMode(true);
 stdin.resume();
@@ -163,6 +300,7 @@ stdin.on('data', data => {
 	const word = () => r(r(query.slice(0, xi)).match(/[0-9a-zA-Z_#]*/));
 	const repl = (a,b) => query = r(r(query).replace(r(a), r(b)));
 	const replword = (a,b) => { repl(a,b); ti = -1; xi = query.length; };
+	if (key === '\\') key = lambda;
 	switch (key) {
 		case 'escape': ti = -1; break;
 		case 'uparrow': yc(1); break; case 'downarrow': yc(-1); break;
@@ -190,7 +328,7 @@ stdin.on('data', data => {
 
 function formatpairs(pairs) {
 	const maxlen = Math.max(...pairs.map(x => x[0].length));
-	return pairs.map(([k,v]) => `${k}${mv(maxlen)} : ${v}`).join('\n');
+	return pairs.map(([k,v]) => `${k}${mv(maxlen)} : ${str(v, k)}`).join('\n');
 }
 
 if (!history.length) print('Type #help for more information');
@@ -211,28 +349,23 @@ function interp() {
 #help						Bring up this info
 #clear					Clear the screen
 #clearhistory		Clear the history
-#export "file"	Export variables and functions
-#import "file"	Import variables and functions
-#vars						List builtin variables
-#funcs					List builtin functions
-#uservars				List user defined variables
-#userfuncs			List user defined functions
-#rmfunc					Remove user defined function
-#rmvar					Remove user defined variable
+#export "file"	Export variables
+#import "file"	Import variables
+#builtin				List builtin variables
+#vars						List variables
+#intrinsics			List intrinsic functions
+#rmvar					Remove variable
 `);
 			break;
-		case c('#rmfunc'): { const f = params('#rmfunc')[0].value; if (funcs[f]) delete funcs[f]; print(f); break }
 		case c('#rmvar'): { const f = params('#rmvar')[0].value; if (vars[f]) delete vars[f]; print(f); break }
-		case c('#vars'): print(formatpairs(Object.entries(builtinvars))); break;
-		case c('#funcs'): print(formatpairs(Object.entries(builtinfuncs).map(([k]) => [k,'']))); break;
-		case c('#uservars'): print(formatpairs(Object.entries(vars).map(([k,v]) => [k, v.value]))); break;
-		case c('#userfuncs'): print(formatpairs(Object.entries(funcs).map(([k,v]) => [`${k}(${v.args.join(', ')})`, str(v.f)]))); break;
+		case c('#builtin'): print(formatpairs(Object.entries(builtinvars))); break;
+		case c('#vars'): print(formatpairs(Object.entries(vars).map(([k,v]) => [k, v.value]))); break;
+		case c('#intrinsics'): print(formatpairs(Object.keys(intrinsics).map(k => [k,'']))); break;
 		case c('#clearhistory'): emu('#export ""'); history.length = 0; emu('#import ""'); emu('#clear'); addhist = false; break;
 		case c('#clear'): console.clear(); break;
 		case c('#export'): {
-			const qs = Object.values(funcs).concat(Object.values(vars)).map(x => x.query);
-			const hist = Array.from(new Set(history.filter(x => qs.includes(x))));
-			fs.writeFileSync(`${params('#export')[0].value}.calc`, hist.join('\n'));
+			const qs = Object.entries(vars).map(([k,v]) => `${k} := ${str(v.value, k, true)}`);
+			fs.writeFileSync(`${params('#export')[0].value}.calc`, qs.join('\n'));
 			w('\n');
 			addhist = false;
 			break;
@@ -247,12 +380,10 @@ function interp() {
 		default: 
 			try {
 				const v = run(parse(query));
-				switch (view) {
-					case 16: print(`0x${v.toString(16)}`); break;
-					case 8: print(`0${v.toString(8)}`); break;
-					case 2: print(`0b${v.toString(2)}`); break;
-					default: print(v); break;
-				}
+				const c = 0xffff00;
+				const vf = {16:'x',8:'',2:'b'};
+				const s = vf[view] ? `0${vf[view]}${v.toString(view)}` : str(v);
+				print(`${color(c)}${s}${color()}`);
 			} catch (e) { ti = -1; xi = oxi; prompt(e); clear = addhist = false; }
 	}
 	if (addhist) history.push(query);
