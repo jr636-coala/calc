@@ -29,7 +29,7 @@ const equal = (a,b,am={},bm={}) => {
 		case lambda: return a.lhs.length === b.lhs.length
 			&& equal(a.rhs, b.rhs, extmap(am, a.lhs, b.lhs), extmap(bm, b.lhs, a.lhs))
 	}
-	return equal(a.lhs, b.rhs, am, bm);
+	return equal(a.lhs, b.lhs, am, bm) && equal(a.rhs, b.rhs, am, bm);
 };
 const PREFIX_PREC = { '!': true, '~': true };
 const mw = value => ({ op: 'number', value });
@@ -223,7 +223,7 @@ function run(expr) {
 				return intrinsics[_l.value](...args);
 			}
 			if (_l.op === lambda) {
-				const v = rhs;
+				const v = r();
 				let out = _l;
 				const lterms = terms(_l, true);
 				const riterms = terms(v, true);
@@ -256,6 +256,7 @@ function run(expr) {
 					}
 				};
 				out = it(out.rhs);
+				print(str(out));
 				if (l.lhs.length > 1) return { rec: _l.rec, lhs: l.lhs.slice(1), op: lambda, rhs: out };
 				return run(out);
 			}
@@ -328,7 +329,7 @@ stdin.on('data', data => {
 
 function formatpairs(pairs) {
 	const maxlen = Math.max(...pairs.map(x => x[0].length));
-	return pairs.map(([k,v]) => `${k}${mv(maxlen)} : ${str(v, k)}`).join('\n');
+	return pairs.map(([k,v]) => `${k}${mv(maxlen)} : ${str(v, void 0, '')}`).join('\n');
 }
 
 if (!history.length) print('Type #help for more information');
@@ -364,7 +365,7 @@ function interp() {
 		case c('#clearhistory'): emu('#export ""'); history.length = 0; emu('#import ""'); emu('#clear'); addhist = false; break;
 		case c('#clear'): console.clear(); break;
 		case c('#export'): {
-			const qs = Object.entries(vars).map(([k,v]) => `${k} := ${str(v.value, k, true)}`);
+			const qs = Object.entries(vars).map(([k,v]) => `${k} := ${str(v.value, void 0, '')}`);
 			fs.writeFileSync(`${params('#export')[0].value}.calc`, qs.join('\n'));
 			w('\n');
 			addhist = false;
