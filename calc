@@ -3,53 +3,211 @@ import fs from 'fs';
 const { stdin, stdout } = process,
 extrarows = stdin.isTTY && process.argv.length === 2 ? 2 : 0;
 const w = m => stdout.write(m+'');
-Array.prototype.find_and_map = function(f) {let v;if(this.some(x=>v=f(x)))return v}
-const precTable=t=>Object.fromEntries(t.map(x=>(t=x.splice(-2),x.map(x=>[x,t]))).flat());
-const INFIX_PREC = precTable([
-	['**',30,31],
-	['^','|','&',28,29],
-	['*','/',26,27],
-	['+','-',24,25],
-	['=','!=','<','>','<=','>=',22,23],
-	['&&','||',18,19],
-	// 17 -- lambda application
-	['.',15,16],
-	[',',13,14],
-	[':=',11,12]
-]);
-const sops = ['**', '+', '-', '*', '/', '=>', '&&', '||', '!=', '>=', '>', '<=', '<', '.', ':=', '=', '(', ')', '{', '}', '[', ']', ',', '!', '#', '&', '^', '|', '~'];
-const lambda = `\u03BB`;
-const equal = (a,b,am={},bm={}) => {
-	if (a === b) return true;
-	if (a.op !== b.op) return false;
-	const extmap = (m, a, b) => ({ ...m, ...Object.fromEntries(a.map((x,i) => [x,b[i]])) });
-	switch (a.op) {
-		case 'var': if (am[a.value] || bm[b.value]) return am[a.value] === b.value;
-		case 'number': return a.value === b.value;
-		case lambda: return a.lhs.length === b.lhs.length
-			&& equal(a.rhs, b.rhs, extmap(am, a.lhs, b.lhs), extmap(bm, b.lhs, a.lhs))
-	}
-	return equal(a.lhs, b.lhs, am, bm) && equal(a.rhs, b.rhs, am, bm);
-};
-const PREFIX_PREC = { '!': true, '~': true };
-const mw = value => ({ op: 'number', value });
-const mu = x => x.value;
-const m = f => (...a) => mw(Math[f](...a.map(mu)));
-let view;
-const intrinsics = { radians: a => mw(mu(a)*Math.PI/180), degrees: a => mw(mu(a)/Math.PI*180),
-	hex: a => (view = 16, a), bin: a => (view = 2, a), dec: a => (view = 0, a), oct: a => (view = 8, a),
-};
-['min','max','abs','sin','cos','tan','log','ceil','floor','random','trunc','exp','sqrt','pow'].forEach(x => intrinsics[x] = m(x));
-const builtinvars = {
-	pi: mw(Math.PI),
-	e: mw(Math.E),
-	pair: parse(`${lambda} f s p. p f s`),
-	true: parse(`${lambda} a b. a`),
-	false: parse(`${lambda} a b. b`)
-};
+const lambdach = `\u03BB`;
+
+const lambda = ((_=(config={ch: '\\',f: t => t}) => {
+	const out = s => out.run(out.parse(s)), c = {}, nodes = [];
+	const is = {
+		l: t => t.pop && t[0] === '',
+		a: t => t.pop && t[0] !== '',
+		n: t => !!t.toFixed,
+		t: t => typeof t === 'string' || !!t.id
+	};
+	const $ = (l, a, n, x) =>
+		(t, f) => (f = $(l, a, n, x), is.l(t) ? l(t, f) : is.a(t) ? a(t, f) : is.n(t) ? n(t, f) : x(t, f));
+	const equ = t => $(
+		u=>is.l(t)&&equ(t[1])(u[1]),
+		u=>is.a(t)&&t.length===u.length&&t.every((_,i)=>equ(t[i])(u[i])),
+		u=>t===u,
+		u=>t.id&&t.id===u.id||(t.id||u.id)&&equ(unbox(t))(unbox(u))||t===u);
+	const addNode = (n => (v, b = []) => {
+		const _equ = equ(v);
+		const bound = out.bound(v);
+		if (is.a(v) && bound.length || is.l(v) && b.length) return v;
+		for (const n in nodes) {
+			const { iv, v } = nodes[n];
+			if (iv && _equ(iv) || _equ(v)) return { id: n|0 };
+		}
+		const iv = JSON.parse(JSON.stringify(v));
+		const e = is.l(v);
+		nodes[n] = { ...e ? { e } : { iv }, v };
+		return { id: n++ };
+	})(1);
+	const u = (p, r) => {while (p());return r()};
+	const w = f => t => (x => ({ value: x, toString: ex => out.str(x, ex) }))(f(t));
+	const box = t => t.id ? t : addNode(t);
+	const unbox = t => t.id ? unbox(nodes[t.id].v) : t;
+	const nary = t => {
+		const ts = [];
+		let _t = unbox(t);
+		while (_t.pop && t[0] !== '') {
+			ts.unshift(unbox(_t[1]));
+			_t = unbox(_t[0]);
+		}
+		let bad = is.a(_t);
+		ts.unshift(unbox(_t));
+		const _pf = _ => true;
+		const it = $((t,f) => ['', f(t[1])],(t,f)=>box(t.map(f)),t=>t,box);
+		return it(c.f(n => n + 1 !== ts.length || bad
+			? _ => void 0
+			: (g,...p) => {
+				if (!p.length === 1) p.push(_pf);
+				let pf = _pf;
+				if (ts.every((x,i) => (pf = (typeof p[i] === 'string' ? x => x === p[i] : p[i]) ?? pf)(x))) {
+					let v = g(ts);
+					return typeof v === 'number' ? v+'' : v;
+				}
+			}, ts.length) ?? t);
+	};
+	out.parse = str => {
+		let i = 0;
+		const expr = (b, m= (j=i) => u(_ => str[i++]?.match(/[^\s.()]/), _ => str.slice(j, --i))) => {
+			const box = t => {
+				if (t.length === 1) return t[0];
+				let _t = t.splice(0, 2);
+				while (t.length) _t = [addNode(_t), t.shift()];
+				return addNode(_t);
+			};
+			const t = []; let x,y;
+			while (i < str.length) {
+				if (/\s/.test(str[i])) { ++i; continue; }
+				switch (str[i]) {
+					case '(': ++i; t.push(expr(b)); break;
+					case ')': ++i; return box(t);
+					case '.': debugger;throw'';
+					case c.ch:
+						++i,x = [...b],y = 0;
+						do {++y;x.unshift(m());while (/\s/.test(str[i])) ++i} while (x[0]);
+						x.shift(); --y;
+						++i;
+						x = expr(x);
+						for (let i = 0; i < y; ++i) x = ['', x];
+						return box([...t, addNode(x, b)]);
+					default:
+						y = b.indexOf(x = m(i));
+						if (y === -1) y = addNode(x);
+						t.push(y);
+				}
+			}
+			return box(t)
+		};
+		return expr([]);
+	};
+	out.str = (t, ex) => {
+		ex = ex ? t => out.expand(t) : t => t;
+		t = ex(t);
+		const free = out.free(t);
+		let g = 0,x;
+		const k=t=>u(_=>free.includes(t=(10+g%26).toString(36)+((g+=1)/26|0||'')),_=>t);
+		return $(
+			(t, f, s=[]) => u(_=>is.l(unbox(t))&&(s.push(x = k()),t=ex(out.subst(t,x,void 0, _=>_))[1]),
+				_=>`(\u03bb${s.join(' ')}. ${f(t)})`),
+			(t, f) => u(_=>is.a(unbox(t[0]))&&(t = unbox(unbox(t[0]).concat(t.slice(1)))),_=>`(${t.map(f).join(' ')})`),
+			t => `.${t}`,
+			(t, f) => {
+				const n = nodes[t.id];
+				return n ? typeof n.iv === 'string' && isNaN(n.v) ? n.iv : f(n.v) : t;
+			})(t);
+	};
+	out.free = $((t, f)=>f(t[1]), (t, f)=>t.map(f).flat(), _=>[], (t, f)=>t.id?f(nodes[t.id].v):[t]);
+	out.bound = t =>
+		Array.from(new Set($(_=>[], (t, f)=>t.map(f).flat(), t=>[t], (t, f)=>t.id?f(nodes[t.id].v):[])(t)));
+	out.expand = $((t,f)=>t.map(f),(t,f)=>t.map(f), t=>t, (t,f)=>t.id?f(nodes[t.id].v):t);
+	out.subst = (t, r, i=-1, b = box) => $(
+		t => b(['', out.subst(unbox(t)[1], r, i + 1, b)]),
+		(t, f) => b(t.map(f)),
+		t => t === i ? r : t,
+		(t, f) => nodes[t.id] ? (i<1 ? f : _ => _)(nodes[t.id].v) : b(t))(t);
+	out.run = w($(
+		t => t,
+		(t, f) => {
+			const it = ([l, r]) => {
+				l = unbox(f(l));
+				if (!is.l(l)) {
+					r = unbox(r);
+					if (is.a(r)) r = box(it(r));
+					return nary([nary(l), nary(r)]);
+				}
+				return unbox(out.subst(l, r))[1];
+			};
+			let _t;
+			do t = unbox(it(_t = t));
+			while (is.a(t) && !equ(_t)(t));
+			return box(t);
+		},
+		_ => {debugger;throw''},
+		(t, f) => {
+			const n = nodes[t.id];
+			if (n) {
+				if (!n.e) {
+					n.v = unbox(f(n.v));
+					n.e = true;
+				}
+			} else return nary(t);
+			return t;
+		}));
+	out.new = _;
+	out.nodes = nodes;
+	out.is = is;
+	return (out.config = x => Object.assign(c, x) && out)(config)
+}) => _)()();
+
+const intrinsics = {};
+
+const un_intrinsics = ['abs','sin','cos','tan','ceil','floor','random','trunc','exp','sqrt'];
+const bin_intrinsics = ['min', 'max', 'log', 'pow'];
+const misc_intrinsics = [['radians',a => a*Math.PI/180],['degrees',a => a/Math.PI*180]];
+
 const vars = {}, history = [];
+const builtinvars = { true: lambda('\\a b. a').value, false: lambda('\\a b. b').value, pi: Math.PI, E: Math.E };
+
 const list = ['#help','#clear','#clearhistory','#export','#import','#vars','#builtin','#intrinsics','#rmfunc','#rmvar']
 	.concat(Object.keys(builtinvars))
+	.concat(un_intrinsics)
+	.concat(bin_intrinsics)
+	.concat(misc_intrinsics.map(x=>x[0]));
+
+lambda.config({ ch: lambdach, f: (nary, n) => {
+	const nul = nary(0), un = nary(1), bin = nary(2);
+	const num = x => !isNaN(x), _ = _ => true;
+	const tru = ['',['',1]], fls = ['',['',0]];
+	const pair = (a,b) => ['',[[0,a],b]];
+	const bool = b => b ? tru : fls;
+	const math = (s, f) => f(([,...a]) => Math[s](...a), s, num);
+	const numop = (o, f) => bin(([a,,b]) => f(a*1,b*1), num, o, num);
+	const boolop = (o, f) => bin(([a,,b]) => bool(f(a,b)), _, o, _);
+	const viewop = (s, p, n) => un(([,a]) => `${p}${(a*1).toString(n)}`, s);
+
+un_intrinsics.forEach(x => intrinsics[x]=_=>math(x, un));
+bin_intrinsics.forEach(x => intrinsics[x]=_=>math(x,bin));
+misc_intrinsics.forEach(([k,v]) => intrinsics[k]=_=>un(([,a]) => v(a), k, num));
+
+	return void 0
+		?? nul(([a]) => Number(a), num)
+		?? numop('+', (a,b) => a+b) ?? numop('-', (a,b) => a+b)
+		?? numop('*', (a,b) => a+b) ?? numop('**', (a,b) => a**b)
+		?? numop('^', (a,b) => a^b) ?? numop('&', (a,b) => a&b)
+		?? numop('|', (a,b) => a|b)
+		?? bin(([a,,b]) => a/b, num, '/', t => num(t) && t != 0)
+		?? boolop('=', (a,b) => a===b) ?? boolop('!=', (a,b) => a!==b)
+		?? boolop('<', (a,b) => a<b) ?? boolop('<=', (a,b) => a<=b)
+		?? boolop('>', (a,b) => a>b) ?? boolop('>=', (a,b) => a>=b)
+		?? boolop('&&', (a,b) => a&&b) ?? boolop('||', (a,b) => a||b)
+		?? boolop('=>', (a,b) => !a||b)
+		?? un(([,a]) => ~a, '~', num)
+		?? bin(([a,,b]) => pair(a,b), _, ',', _)
+		?? un(([a,b]) => `${a} ${b}`, t => t.startsWith?.('"') && !t.endsWith('"'), _)
+
+		?? viewop('hex', '0x', 16) ?? viewop('dec', '', 10)
+		?? viewop('oct', '0', 8) ?? viewop('bin', '0b', 2)
+		
+		?? bin(([a,,b]) => (list.push(a), vars[a] = b), _, ':=', _)
+		?? nul(([a]) => vars[a], t => vars[t])
+		?? Object.values(intrinsics).reduce((acc, x) => acc||x(), void 0)
+		?? Object.keys(builtinvars).reduce((acc, x) => acc||nul(()=>builtinvars[x], x), void 0)
+		//?? un('+', ([a]) => ['+',a], lambda.is.a)
+		//?? nul('y', () => 'beef')
+} });
 
 let query = '', clear = true, res, next = new Promise(r => res = r), suggest;
 
@@ -69,201 +227,6 @@ const emu = x => (w((query = x, `${resit('')}> ${x}\n`)),interp(x));
 try { fs.readFileSync('.calc', 'utf-8').split('\n').filter(x => x).forEach(emu); } catch (e) {}
 const closeHandler = () => { fs.writeFileSync('.calc', history.join('\n')); process.exit(); };
 process.on('SIGTERM', closeHandler); process.on('exit', closeHandler);
-
-
-function* Tokeniser(src) {
-	let index = 0, line = 1, lstart = 0;
-  const char = () => src[index] || '';
-	const token = (type, value, i = index) => ({ type, value, index: i + 1, line, lstart });
-	const getChars = r => { let out = ''; while (char().match(r)) { out += char(); ++index; } return out; };
-	while (index < src.length) {
-  	while (char().match(/\s/)) { ++index; if (src[index-1] === '\n') { lstart = index; ++line; } }
-		const ret = [
-			[[['0x', /[0-9a-fA-F]/],['0b',/[01]/],['0',/[0-7]/]], ([s,r]) => {
-				if (!src.startsWith(s, index) || !r.test(src[index + s.length])) return;
-				index += s.length;
-				const f = x => Number.parseInt(x, {'0x':16,'0b':2,'0':8}[s]);
-				return token('number', f(getChars(r)));
-			}],
-			[[,],() => {
-				const oind = index;
-			}],
-			[[[]], () => {
-				if (!char().match(/[.0-9]/)) return;
-				const i = index;
-				let frac = false;
-				while (true) {
-					if (char() === '.') {
-						if (frac) break; frac = true;
-					}
-					else if (!char().match(/[0-9]/)) break;
-					++index;
-				}
-				const n = Number.parseFloat(src.substring(i, index))
-				if (isNaN(n)) {
-					index = i;
-					return;
-				}
-				return token('number', n);
-			}],
-			[[['var', /[a-zA-Z_]/, /[0-9a-zA-Z_]/],
-			['string', '"', /[^"]/, true], ['string', '\'', /[^']/, true]], ([t, sr, r, o, f = x => x]) => {
-				if (!char().match(sr)) return; if (o) ++index; const out = token(t, f(getChars(r))); if (o) ++index;
-				return out;
-			}],[sops.concat(lambda),s => src.startsWith(s, index) && (token(s, void 0, (index += s.length) - s.length))]
-  	].find_and_map(([t,f]) => t.find_and_map(f));
-  	if (ret) { yield ret; continue } if (index >= src.length) break;
-	  throw `Tokeniser error (ln ${line}:${index-lstart+1})`;
-	} while(1) yield token('EOF');
-} function alltokens(q) {const t=[],k=Tokeniser(q);do t.push(k.next().value);while(t[t.length-1].type!=='EOF')return t}
-
-function parse(q) {
-	let index = 0; const tokens = alltokens(q), currentToken = () => tokens[index]; return parseExpr();
-function parseExpr(mprec = 0) { const eof = () => index >= tokens.length || currentToken().type === 'EOF',
-	type = t => !eof() && (t === undefined ? currentToken().type : currentToken().type === t),
-	atom = () => { switch (type()) { case 'string': case 'number': case 'var': return (x => ({ op: x.type, ...x }))(tokens[index++]); default: throw 'invalid expression'; } };
-	const preExpr = () => { if (type('(')) { ++index; const expr = parseExpr(); ++index; return expr; }
-		if (type(lambda)) { ++index;
-			const lhs = []; while (type('var')) { lhs.push(currentToken().value); ++index; }
-			if (!type('.')) throw `Malformed lambda`; ++index;
-			return {lhs,op:lambda,rhs:parseExpr()};
-		}
-		return atom(); };
-	let lhs = preExpr(mprec); while (1) {
-		if (!INFIX_PREC[type()]) {
-			if (eof() || type(')') || 17 <= mprec) break;
-			const rhs = parseExpr(17);
-			lhs = {lhs,op:'app',rhs};
-			continue;
-		}
-		const [l,r] = INFIX_PREC[type()]; if (l < mprec) break;
-		const op = type(); ++index; const rhs = parseExpr(r); lhs = {lhs,op,rhs}; }
-	return lhs;
-} }
-
-function str(x, is, isc, i) {
-	if (!x) return '';
-	const wrap = s => i && i !== x.op ? `(${s})` : s;
-	switch (x.op) {
-		case 'intrinsic':
-		case 'var': case 'number': return x.value;
-		case 'app': return wrap(`${str(x.lhs, isc && is, isc, 'app')} ${str(x.rhs, isc && is, isc, true)}`);
-		case lambda:
-			for (const v in builtinvars) if (isc !== '' && is !== v && equal(x, builtinvars[v])) return v;
-			for (const v in vars) if (isc !== '' && is !== v && equal(x, vars[v].value)) return v;
-			return wrap(`${lambda}${x.lhs.join(' ')}. ${str(x.rhs, isc && is, isc)}`);
-		default: return wrap(`${str(x.lhs, isc && is, isc, true)} ${x.op} ${str(x.rhs, isc && is, isc, true)}`);
-	}
-}
-function run(expr) {
-	view = 0;
-	//print(JSON.stringify(expr));
-	//print(str(expr, void 0, ''));
-	const { lhs, rhs, value } = expr,
-	l = () => run(lhs), r = () => run(rhs);
-	if (![':=','.',','].includes(expr.op) && sops.includes(expr.op)) {
-		const lhs = l(), rhs = r();
-		if (lhs.op !== 'number' || rhs.op !== 'number') return {lhs,op:expr.op,rhs};
-		const ln = mu(lhs), rn = mu(rhs);
-		const tru = builtinvars.true, fls = builtinvars.false;
-		const b = x => x ? tru : fls;
-		switch (expr.op) {
-			case '+': return mw(ln + rn); case '-': return mw(ln - rn); case '*': return mw(ln * rn); case '/': return mw(ln / rn);
-			case '=': return b(ln === rn); case '!=': return b(ln !== rn);
-			case '>=': return b(ln >= rn); case '<=': return b(ln <= rn); case '>': return b(ln > rn); case '<': return b(ln < rn);
-			case '!': return b(!rn); case '~': return mw(~rn); case '&': return mw(ln & rn); case '|': return mw(ln | rn);
-			case '=>': return ln ? mw(rn) : tru; case '&&': return b(ln && rn); case '||': return b(ln || rn); case '**': return mw(ln ** rn);
-		}
-	}
-
-	const pair = { op: 'var', value: 'pair' };
-	const terms = (e, intro) => { const t = new Set();
-		const it = e => { switch (e.op) {
-		case 'var': intro || t.add(e.value); break; case 'number': break;
-		case lambda: e.lhs.forEach(x => t.add(x)); it(e.rhs); break;
-		default: it(e.lhs); it(e.rhs); break; } };
-		it(e); return Array.from(t.values()); };
-	const _nt = (t, i = 0) => { t = [...t];
-		const s = _ => String.fromCharCode((_%26) + 'a'.charCodeAt() + (_/26|0));
-		return () => { let x; while (t.includes(x = s(i))) ++i; t.push(x); return x; };
-	};
-
-	switch (expr.op) {
-		case ',': return run({ lhs: { lhs: pair, op: 'app', rhs:l() }, op: 'app', rhs:r()});
-		case lambda: if (expr.rhs.op === lambda) {
-			//const rhs = r();
-			//return { op: lambda, lhs: lhs.concat(rhs.lhs), rhs: rhs.rhs };
-		}
-		case 'number': return expr;
-		case 'var': return vars[value]?.value ?? builtinvars[value] ?? (() => {
-			if (intrinsics[value]) return { op: 'intrinsic', value };
-			return expr})();
-		case ':=': {
-			let l = lhs;
-			while (l.op === 'app') l = l.lhs;
-			l = l.value;
-			list.push(l);
-			const r = run(rhs);
-			return (vars[l] = { rec: terms(r).includes(l), value: r, query }).value;
-		}
-		case 'app': {
-			const _l = l();
-			if (_l.op === 'intrinsic') {
-				const args = [];
-				const it = e => {
-					const l = run({ op: 'app', rhs: builtinvars.true, lhs: e });
-					const r = run({ op: 'app', rhs: builtinvars.false, lhs: e });
-					args.push(r);
-					if (r.op !== 'number') throw 'Bad intrinsic call';
-					if (l.op === lambda) it(l);
-					else if (l.op !== 'number') throw 'Bad intrinsic call';
-					else args.push(l);
-				};
-				it (r());
-				return intrinsics[_l.value](...args);
-			}
-			if (_l.op === lambda) {
-				const v = r();
-				let out = _l;
-				const lterms = terms(_l, true);
-				const riterms = terms(v, true);
-				const rterms = terms(v).filter(x => !riterms.includes(x));
-				const nt = _nt(lterms.concat(rterms));
-				for (const t of rterms) {
-					if (lterms.includes(t)) {
-						const v = {op: 'var',value: nt()};
-						const it = e => {
-							switch (e.op) {
-								case 'number': return e;
-								case 'var': return e.value === t ? v : e;
-								case lambda: return {lhs:e.lhs.map(x => x === t ? v.value : x),op:lambda,rhs:it(e.rhs)};
-								default: return { lhs: it(e.lhs), op: e.op, rhs: it(e.rhs) };
-							}
-						};
-						out = it(out);
-					}
-				}
-				const l = out;
-				const t = l.lhs[0];
-				let expv;
-				const _v = () => expv ?? (expv = run(v));
-				const it = e => {
-					switch (e.op) {
-						case 'number': return e;
-						case 'var': return e.value === t ? _v() : e;
-						case lambda: return e.lhs.includes(t) ? e : {...e,rhs:it(e.rhs)};
-						default: return { lhs: it(e.lhs), op: e.op, rhs: it(e.rhs) };
-					}
-				};
-				out = it(out.rhs);
-				print(str(out));
-				if (l.lhs.length > 1) return { rec: _l.rec, lhs: l.lhs.slice(1), op: lambda, rhs: out };
-				return run(out);
-			}
-			return { lhs: _l, op: 'app', rhs: rhs };
-		}
-	}
-}
 
 stdin.setRawMode(true);
 stdin.resume();
@@ -301,7 +264,7 @@ stdin.on('data', data => {
 	const word = () => r(r(query.slice(0, xi)).match(/[0-9a-zA-Z_#]*/));
 	const repl = (a,b) => query = r(r(query).replace(r(a), r(b)));
 	const replword = (a,b) => { repl(a,b); ti = -1; xi = query.length; };
-	if (key === '\\') key = lambda;
+	if (key === '\\') key = lambdach;
 	switch (key) {
 		case 'escape': ti = -1; break;
 		case 'uparrow': yc(1); break; case 'downarrow': yc(-1); break;
@@ -329,7 +292,7 @@ stdin.on('data', data => {
 
 function formatpairs(pairs) {
 	const maxlen = Math.max(...pairs.map(x => x[0].length));
-	return pairs.map(([k,v]) => `${k}${mv(maxlen)} : ${str(v, void 0, '')}`).join('\n');
+	return pairs.map(([k,v]) => `${k}${mv(maxlen)} : ${v}`).join('\n');
 }
 
 if (!history.length) print('Type #help for more information');
@@ -339,9 +302,9 @@ function interp() {
 	if (!query) return;
 	let addhist = true;
 	const params = (s) => {
-		const t = alltokens(query.slice(s.length));
+		const t = query.split(' ');
 		if (t.length === 1) print(`${s} requires a parameter`);
-		return t.slice(0, -1);
+		return t.slice(1);
 	};
 	const c = s => query.startsWith(s);
 	if (query === '#') process.exit();
@@ -350,29 +313,30 @@ function interp() {
 #help						Bring up this info
 #clear					Clear the screen
 #clearhistory		Clear the history
-#export "file"	Export variables
-#import "file"	Import variables
+#export file		Export variables
+#import file		Import variables
 #builtin				List builtin variables
 #vars						List variables
 #intrinsics			List intrinsic functions
 #rmvar					Remove variable
+(*TODO :: Fixup stringification for nested lambdas (not pulling from node v) *)
 `);
 			break;
-		case c('#rmvar'): { const f = params('#rmvar')[0].value; if (vars[f]) delete vars[f]; print(f); break }
-		case c('#builtin'): print(formatpairs(Object.entries(builtinvars))); break;
-		case c('#vars'): print(formatpairs(Object.entries(vars).map(([k,v]) => [k, v.value]))); break;
+		case c('#rmvar'): { const f = params('#rmvar')[0]; if (vars[f]) delete vars[f]; print(f); break }
+		case c('#builtin'): print(formatpairs(Object.entries(builtinvars).map(([k,v]) => [k,lambda.str(v)]))); break;
+		case c('#vars'): print(formatpairs(Object.entries(vars).map(([k,v]) => [k, lambda.str(v)]))); break;
 		case c('#intrinsics'): print(formatpairs(Object.keys(intrinsics).map(k => [k,'']))); break;
 		case c('#clearhistory'): emu('#export ""'); history.length = 0; emu('#import ""'); emu('#clear'); addhist = false; break;
 		case c('#clear'): console.clear(); break;
 		case c('#export'): {
 			const qs = Object.entries(vars).map(([k,v]) => `${k} := ${str(v.value, void 0, '')}`);
-			fs.writeFileSync(`${params('#export')[0].value}.calc`, qs.join('\n'));
+			fs.writeFileSync(`${params('#export')[0]}.calc`, qs.join('\n'));
 			w('\n');
 			addhist = false;
 			break;
 		}
 		case c('#import'): {
-			const hist = fs.readFileSync(`${params('#import')[0].value}.calc`, 'utf-8').split('\n').filter(x => !history.includes(x));
+			const hist = fs.readFileSync(`${params('#import')[0]}.calc`, 'utf-8').split('\n').filter(x => !history.includes(x));
 			hist.forEach(emu);
 			addhist = false;
 			break;
@@ -380,10 +344,9 @@ function interp() {
 		case c('#eval'): print(eval(query.slice('#eval'.length))); break;
 		default: 
 			try {
-				const v = run(parse(query));
+				const v = lambda(query);
 				const c = 0xffff00;
-				const vf = {16:'x',8:'',2:'b'};
-				const s = vf[view] ? `0${vf[view]}${v.toString(view)}` : str(v);
+				const s = v.toString();
 				print(`${color(c)}${s}${color()}`);
 			} catch (e) { ti = -1; xi = oxi; prompt(e); clear = addhist = false; }
 	}
